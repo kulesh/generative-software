@@ -1,5 +1,5 @@
 settings:
-  integration: "inline" #"module"  # or "inline"
+  integration: "module" #"module"  # or "inline"
 
 name: wordcount
 description: >

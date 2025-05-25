@@ -5,6 +5,7 @@ from rich import print
 from rich.console import Console
 from rich.markdown import Markdown
 import yaml
+import re
 from collections import defaultdict, deque
 from datetime import datetime
 from openai import OpenAI
@@ -53,6 +54,12 @@ def save_text_file(path: Path, content: str):
     path.write_text(content, encoding='utf-8')
 
 
+def extract_code_block(text: str) -> str:
+    """Extract clean Python code from a response."""
+    code_block = re.search(r"```(?:python)?\n(.*?)```", text, re.DOTALL)
+    return code_block.group(1).strip() if code_block else text.strip()
+
+
 def call_openai(prompt: str, log_path: Path, model: str) -> str:
     try:
         response = client.chat.completions.create(
@@ -64,10 +71,11 @@ def call_openai(prompt: str, log_path: Path, model: str) -> str:
             temperature=0.5,
             max_tokens=800
         )
-        output = response.choices[0].message.content.strip()
+        raw_output = response.choices[0].message.content.strip()
+        code_output = extract_code_block(raw_output)
 
-        save_text_file(log_path, f"[{timestamp()}] === PROMPT ===\n{prompt}\n\n[{timestamp()}] === RESPONSE ===\n{output}")
-        return output
+        save_text_file(log_path, f"[{timestamp()}] === PROMPT ===\n{prompt}\n\n[{timestamp()}] === RAW RESPONSE ===\n{raw_output}\n\n[{timestamp()}] === EXTRACTED CODE ===\n{code_output}")
+        return code_output
     except Exception as e:
         console.print(f"[red]OpenAI API error:[/red] {e}")
         raise typer.Exit(1)
@@ -85,7 +93,7 @@ def load_prompt_text(step_id: str, step: dict) -> str:
     if not prompt_text:
         console.print(f"[red]No prompt or prompt_file found for step:[/red] {step_id}")
         raise typer.Exit(1)
-    return prompt_text.strip()
+    return (prompt_text.strip() + "\n\nRespond only with valid Python code. Do not include markdown, backticks, or explanations.")
 
 
 def get_dependencies(flow: list[dict], step_id: str) -> list[str]:
@@ -124,13 +132,20 @@ def trace(spec: str = typer.Argument(..., help="Path to the YAML spec")):
         console.print(Markdown(f"```log\n{content}\n```"))
 
 
-@app.command()
+@app.command(help="Run the prompts in DAG order, generate and save model responses. Must specify --auto or --manual.")
 def run(
     spec: str = typer.Argument(..., help="Path to the YAML spec"),
     auto: bool = typer.Option(False, help="Use OpenAI to generate responses"),
     manual: bool = typer.Option(False, help="Manually input responses instead of using OpenAI")
 ):
-    """Run the prompts in DAG order, generate and save model responses."""
+    """Run the prompts in DAG order."""
+    if auto and manual:
+        console.print("[red]Please specify only one of --auto or --manual, not both.[/red]")
+        raise typer.Exit(1)
+    if not auto and not manual:
+        console.print("[red]Please specify one of --auto or --manual to execute prompts.[/red]")
+        raise typer.Exit(1)
+
     spec_path = Path(spec)
     if not spec_path.exists():
         console.print(f"[red]Spec file not found:[/red] {spec}")
@@ -193,9 +208,6 @@ def run(
             console.print("[cyan]Please enter the model response below:[/cyan]")
             response = input("\n>> ")
             save_text_file(log_path, f"[{timestamp()}] === MANUAL INPUT ===\n{response}")
-        else:
-            console.print(f"[red]Specify --auto or --manual to execute prompts.[/red]")
-            raise typer.Exit(1)
 
         save_text_file(output_dir / f"{step_id}_response.md", response)
         console.print(f"[green]Saved response to {step_id}_response.md[/green]")
