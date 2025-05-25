@@ -1,10 +1,12 @@
-import os
+from pathlib import Path
 import typer
 from typing import Optional
 from rich import print
 from rich.console import Console
+from rich.markdown import Markdown
 import yaml
 from collections import defaultdict, deque
+from datetime import datetime
 from openai import OpenAI
 
 app = typer.Typer()
@@ -43,10 +45,18 @@ def resolve_order(prompts: dict, flow: list[str]) -> list[str]:
     return order
 
 
-def call_openai(prompt: str) -> str:
+def timestamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def save_text_file(path: Path, content: str):
+    path.write_text(content, encoding='utf-8')
+
+
+def call_openai(prompt: str, log_path: Path, model: str) -> str:
     try:
         response = client.chat.completions.create(
-            model="gpt-4",
+            model=model,
             messages=[
                 {"role": "system", "content": "You are a helpful software assistant."},
                 {"role": "user", "content": prompt}
@@ -54,7 +64,10 @@ def call_openai(prompt: str) -> str:
             temperature=0.5,
             max_tokens=800
         )
-        return response.choices[0].message.content.strip()
+        output = response.choices[0].message.content.strip()
+
+        save_text_file(log_path, f"[{timestamp()}] === PROMPT ===\n{prompt}\n\n[{timestamp()}] === RESPONSE ===\n{output}")
+        return output
     except Exception as e:
         console.print(f"[red]OpenAI API error:[/red] {e}")
         raise typer.Exit(1)
@@ -64,11 +77,11 @@ def load_prompt_text(step_id: str, step: dict) -> str:
     prompt_text = step.get("prompt")
     prompt_file = step.get("prompt_file")
     if prompt_file:
-        if not os.path.exists(prompt_file):
+        path = Path(prompt_file)
+        if not path.exists():
             console.print(f"[red]Prompt file not found:[/red] {prompt_file}")
             raise typer.Exit(1)
-        with open(prompt_file, 'r') as pf:
-            prompt_text = pf.read()
+        prompt_text = path.read_text()
     if not prompt_text:
         console.print(f"[red]No prompt or prompt_file found for step:[/red] {step_id}")
         raise typer.Exit(1)
@@ -83,23 +96,54 @@ def get_dependencies(flow: list[dict], step_id: str) -> list[str]:
 
 
 @app.command()
+def trace(spec: str = typer.Argument(..., help="Path to the YAML spec")):
+    """Display logs of prompt execution for review."""
+    spec_path = Path(spec)
+    if not spec_path.exists():
+        console.print(f"[red]Spec file not found:[/red] {spec}")
+        raise typer.Exit(1)
+
+    with spec_path.open('r') as f:
+        data = yaml.safe_load(f)
+
+    spec_name = data.get('name', 'generative_spec')
+    logs_dir = Path("outputs") / spec_name / "logs"
+
+    if not logs_dir.is_dir():
+        console.print(f"[red]No logs found at {logs_dir}[/red]")
+        raise typer.Exit(1)
+
+    log_files = sorted(logs_dir.glob("*.log"))
+    if not log_files:
+        console.print(f"[yellow]No log files to trace.[/yellow]")
+        raise typer.Exit()
+
+    for log_path in log_files:
+        console.rule(f"[bold green]Trace: {log_path.name}[/bold green]")
+        content = log_path.read_text()
+        console.print(Markdown(f"```log\n{content}\n```"))
+
+
+@app.command()
 def run(
     spec: str = typer.Argument(..., help="Path to the YAML spec"),
     auto: bool = typer.Option(False, help="Use OpenAI to generate responses"),
     manual: bool = typer.Option(False, help="Manually input responses instead of using OpenAI")
 ):
     """Run the prompts in DAG order, generate and save model responses."""
-    if not os.path.exists(spec):
+    spec_path = Path(spec)
+    if not spec_path.exists():
         console.print(f"[red]Spec file not found:[/red] {spec}")
         raise typer.Exit(1)
 
-    with open(spec, 'r') as f:
+    with spec_path.open('r') as f:
         data = yaml.safe_load(f)
 
     prompts = data.get('prompts', {})
     flow = data.get('flow', [])
     settings = data.get('settings', {})
-    integration_mode = settings.get('integration', 'inline')  # 'inline' or 'module'
+    integration_mode = settings.get('integration', 'inline')
+    model = settings.get('model', 'gpt-4')
 
     try:
         order = resolve_order(prompts, flow)
@@ -108,10 +152,10 @@ def run(
         raise typer.Exit(1)
 
     spec_name = data.get('name', 'generative_spec')
-    output_dir = os.path.join("outputs", spec_name)
-    os.makedirs(output_dir, exist_ok=True)
-
-    completed_outputs = {}
+    output_dir = Path("outputs") / spec_name
+    logs_dir = output_dir / "logs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     for step_id in order:
         step = prompts[step_id]
@@ -123,16 +167,14 @@ def run(
         if integration_mode == "inline":
             injected_code = []
             for prior_id in prior_ids:
-                dep_path = os.path.join(output_dir, f"{prior_id}_response.md")
-                if os.path.exists(dep_path):
-                    with open(dep_path, 'r') as df:
-                        code = df.read().strip()
-                        injected_code.append(f"# from {prior_id}\n{code}")
+                dep_path = output_dir / f"{prior_id}_response.md"
+                if dep_path.exists():
+                    code = dep_path.read_text().strip()
+                    injected_code.append(f"# from {prior_id}\n{code}")
+            full_prompt = base_prompt
             if injected_code:
                 context_block = "\n\n".join(injected_code)
                 full_prompt = f"Use the following code as reference:\n\n```python\n{context_block}\n```\n\n{base_prompt}"
-            else:
-                full_prompt = base_prompt
 
         elif integration_mode == "module":
             import_lines = [f"from {prior_id} import *" for prior_id in prior_ids]
@@ -143,28 +185,24 @@ def run(
             raise typer.Exit(1)
 
         console.print(f"[italic white]Prompt:[/italic white]\n{full_prompt}")
+        log_path = logs_dir / f"{step_id}.log"
 
         if auto:
-            response = call_openai(full_prompt)
+            response = call_openai(full_prompt, log_path, model)
         elif manual:
             console.print("[cyan]Please enter the model response below:[/cyan]")
             response = input("\n>> ")
+            save_text_file(log_path, f"[{timestamp()}] === MANUAL INPUT ===\n{response}")
         else:
             console.print(f"[red]Specify --auto or --manual to execute prompts.[/red]")
             raise typer.Exit(1)
 
-        response_path = os.path.join(output_dir, f"{step_id}_response.md")
-        with open(response_path, 'w') as rf:
-            rf.write(response)
-        console.print(f"[green]Saved response to {response_path}[/green]")
+        save_text_file(output_dir / f"{step_id}_response.md", response)
+        console.print(f"[green]Saved response to {step_id}_response.md[/green]")
 
         if integration_mode == "module":
-            module_path = os.path.join(output_dir, f"{step_id}.py")
-            with open(module_path, 'w') as mp:
-                mp.write(response)
-            console.print(f"[green]Saved module to {module_path}[/green]")
-
-        completed_outputs[step_id] = response
+            save_text_file(output_dir / f"{step_id}.py", response)
+            console.print(f"[green]Saved module to {step_id}.py[/green]")
 
 
 if __name__ == "__main__":
