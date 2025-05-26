@@ -5,11 +5,11 @@ JITS is a CLI framework for generating, executing, and managing generative softw
 ⸻
 
 🧠 Key Concepts
-	•	Generative Spec: A DAG of prompts describing software components
-	•	Prompt Execution: Each node in the DAG is executed in order
-	•	Dependency Injection: after: dependencies are injected into downstream prompts
-	•	Modular Output: Output can be either inline or Python module format
-	•	Traceability: All inputs/outputs are logged for each prompt
+  - Generative Spec: A DAG of prompts describing software components
+  - Prompt Execution: Each node in the DAG is executed in order
+  - Dependency Injection: after: dependencies are injected into downstream prompts
+  - Modular Output: Output can be either inline or Python module format
+  - Traceability: All inputs/outputs are logged for each prompt
 
 ⸻
 
@@ -17,12 +17,12 @@ JITS is a CLI framework for generating, executing, and managing generative softw
 
 1. Install dependencies
 
-pip install -r requirements.txt
+> `pip install -r requirements.txt`
 
 2. Create a spec file
 
 Example: wordcount.yaml
-
+```
 name: wordcount
 settings:
   integration: module
@@ -44,24 +44,24 @@ flow:
   - id: count_logic
   - id: cli_wrapper
     after: [file_reader, count_logic]
-
+```
 3. Run the prompts
 
-python jits.py run wordcount.yaml --auto
+> `python jits.py run wordcount.yaml --auto`
 
 Or use manual mode:
 
-python jits.py run wordcount.yaml --manual
+> `python jits.py run wordcount.yaml --manual`
 
 4. View trace logs
 
-python jits.py trace wordcount.yaml
+> `python jits.py trace wordcount.yaml`
 
 
 ⸻
 
 📁 Output Structure
-
+```
 outputs/
 └── wordcount/
     ├── file_reader_response.md
@@ -74,14 +74,12 @@ outputs/
         ├── file_reader.log
         ├── count_logic.log
         └── cli_wrapper.log
-
-
-⸻
+```
 
 🧼 Code Hygiene
-	•	All .py files are auto-formatted with black
-	•	flake8 linting is run for diagnostics
-	•	You can extend the system to run tests, type-checks, or deploy steps
+  -	All .py files are auto-formatted with black
+  -	flake8 linting is run for diagnostics
+  -	You can extend the system to run tests, type-checks, or deploy steps
 
 ⸻
 
@@ -89,13 +87,13 @@ outputs/
 
 Add tests to validate behavior of extract_code_block()
 
-python -m unittest test_extract.py
+> `python -m unittest test_extract.py`
 
 
 ⸻
 
 📌 Roadmap Ideas
-	•	Support multi-file structured output (via JSON)
-	•	Build a GUI on top of prompt DAGs
-	•	Add GitHub integration
-	•	Support template libraries for common architectures
+  - Support multi-file structured output (via JSON)
+  - Build a GUI on top of prompt DAGs
+  - Add GitHub integration
+  - Support template libraries for common architectures
