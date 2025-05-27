@@ -2,3 +2,5 @@ typer[all]
 rich
 pyyaml
 openai>=1.0.0
+black
+flake8

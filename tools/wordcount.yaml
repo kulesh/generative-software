@@ -1,42 +1,34 @@
-settings:
-  integration: "module" #"module"  # or "inline"
-
 name: wordcount
-description: >
-  A CLI tool that counts lines, words, and characters in a file.
+
+settings:
+  integration: module         # or "inline"
+  model: gpt-4
 
 prompts:
   count_logic:
-    title: "Count lines, words, characters"
+    title: "Count lines, words, and characters"
     prompt: |
       Write a function that takes a string and returns the number of lines, words, and characters.
-    output_type: function
-    output_eval:
-      method: test
-      criteria:
-        - Matches expected counts
-        - Handles empty input
+      Respond only with valid Python code. Do not include markdown, backticks, or explanations.
+    eval:
+      type: script
+      test_file: tests/test_count_logic.py
 
   file_reader:
     title: "Read file contents"
     prompt: |
       Write a function that takes a file path and returns its contents as a string.
-    output_type: function
-    output_eval:
-      method: test
-      criteria:
-        - Reads valid files
-        - Handles missing files with error
+      Respond only with valid Python code. Do not include markdown, backticks, or explanations.
+    eval:
+      type: script
+      test_file: tests/test_file_reader.py
 
   cli_wrapper:
     title: "Command-line interface"
     prompt_file: prompts/cli_wrapper.md
-    output_type: script
-    output_eval:
-      method: manual
-      criteria:
-        - Correctly parses CLI args
-        - Prints formatted output
+    eval:
+      type: script
+      test_file: tests/test_cli_wrapper.py
 
 flow:
   - id: count_logic

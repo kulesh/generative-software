@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 import yaml
 import re
+import subprocess
 from collections import defaultdict, deque
 from datetime import datetime
 from openai import OpenAI
@@ -60,6 +61,14 @@ def extract_code_block(text: str) -> str:
     return code_block.group(1).strip() if code_block else text.strip()
 
 
+def format_python_file(file_path: Path):
+    try:
+        subprocess.run(["black", str(file_path)], check=True)
+        subprocess.run(["flake8", str(file_path)], check=False)
+    except FileNotFoundError:
+        console.print("[yellow]black or flake8 not found. Skipping formatting.[/yellow]")
+
+
 def call_openai(prompt: str, log_path: Path, model: str) -> str:
     try:
         response = client.chat.completions.create(
@@ -74,7 +83,9 @@ def call_openai(prompt: str, log_path: Path, model: str) -> str:
         raw_output = response.choices[0].message.content.strip()
         code_output = extract_code_block(raw_output)
 
-        save_text_file(log_path, f"[{timestamp()}] === PROMPT ===\n{prompt}\n\n[{timestamp()}] === RAW RESPONSE ===\n{raw_output}\n\n[{timestamp()}] === EXTRACTED CODE ===\n{code_output}")
+        save_text_file(log_path, f"[{timestamp()}] === PROMPT ===\n{prompt}\n\n"
+                                 f"[{timestamp()}] === RAW RESPONSE ===\n{raw_output}\n\n"
+                                 f"[{timestamp()}] === EXTRACTED CODE ===\n{code_output}")
         return code_output
     except Exception as e:
         console.print(f"[red]OpenAI API error:[/red] {e}")
@@ -93,7 +104,7 @@ def load_prompt_text(step_id: str, step: dict) -> str:
     if not prompt_text:
         console.print(f"[red]No prompt or prompt_file found for step:[/red] {step_id}")
         raise typer.Exit(1)
-    return (prompt_text.strip() + "\n\nRespond only with valid Python code. Do not include markdown, backticks, or explanations.")
+    return prompt_text.strip() + "\n\nRespond only with valid Python code. Do not include markdown, backticks, or explanations."
 
 
 def get_dependencies(flow: list[dict], step_id: str) -> list[str]:
@@ -102,6 +113,46 @@ def get_dependencies(flow: list[dict], step_id: str) -> list[str]:
             return node.get('after', [])
     return []
 
+
+@app.command()
+def eval(spec: str = typer.Argument(..., help="Path to the YAML spec")):
+    """Evaluate generated outputs using optional test scripts."""
+    spec_path = Path(spec)
+    if not spec_path.exists():
+        console.print(f"[red]Spec file not found:[/red] {spec}")
+        raise typer.Exit(1)
+
+    with spec_path.open('r') as f:
+        data = yaml.safe_load(f)
+
+    prompts = data.get('prompts', {})
+    spec_name = data.get('name', 'generative_spec')
+    output_dir = Path("outputs") / spec_name
+
+    console.print(f"[bold cyan]Evaluating outputs for: {spec_name}[/bold cyan]")
+    for step_id, step in prompts.items():
+        eval_info = step.get("eval")
+        if not eval_info:
+            continue
+
+        test_type = eval_info.get("type")
+        test_file = eval_info.get("test_file")
+        if test_type == "script" and test_file:
+            test_path = Path(test_file)
+            if not test_path.exists():
+                console.print(f"[yellow]Test file not found for {step_id}: {test_file}[/yellow]")
+                continue
+
+            console.rule(f"[bold green]Running tests for: {step_id}[/bold green]")
+            try:
+                result = subprocess.run(["python", str(test_path)], capture_output=True, text=True)
+                passed = result.returncode == 0
+                console.print(f"[green]PASS[/green]" if passed else f"[red]FAIL[/red]")
+                console.print(result.stdout)
+                if result.stderr:
+                    console.print(f"[yellow]{result.stderr}[/yellow]")
+            except Exception as e:
+                console.print(f"[red]Error running test for {step_id}:[/red] {e}")
 
 @app.command()
 def trace(spec: str = typer.Argument(..., help="Path to the YAML spec")):
@@ -213,8 +264,10 @@ def run(
         console.print(f"[green]Saved response to {step_id}_response.md[/green]")
 
         if integration_mode == "module":
-            save_text_file(output_dir / f"{step_id}.py", response)
-            console.print(f"[green]Saved module to {step_id}.py[/green]")
+            py_file = output_dir / f"{step_id}.py"
+            save_text_file(py_file, response)
+            format_python_file(py_file)
+            console.print(f"[green]Saved and formatted module to {step_id}.py[/green]")
 
 
 if __name__ == "__main__":
