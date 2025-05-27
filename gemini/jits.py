@@ -1,0 +1,233 @@
+import argparse
+import json
+import os
+import sys
+import re
+from collections import defaultdict, deque
+import google.generativeai as genai
+# import google.generativeai.types as genai_types # REMOVED THIS LINE
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+# --- Constants ---
+GENERATED_OUTPUTS_DIR = "generated_outputs"
+LLM_MODELS = ["gemini-1.5-pro-latest", "gemini-1.5-flash-latest", "gemini-pro"]
+
+# --- Gemini Client Initialization ---
+try:
+    gemini_api_key = os.environ.get("GEMINI_API_KEY")
+    if not gemini_api_key:
+        raise ValueError("GEMINI_API_KEY environment variable not set.")
+    genai.configure(api_key=gemini_api_key)
+    # Test a simple call to ensure client is configured
+    _ = genai.GenerativeModel("gemini-1.5-flash-latest").generate_content(
+        "ping",
+        safety_settings=[ # UPDATED SAFETY SETTINGS STRUCTURE FOR TEST CALL
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+    )
+except ValueError as e:
+    logging.error(f"Gemini API Key Error: {e}. Please set it to your Gemini API key.")
+    sys.exit(1)
+except Exception as e:
+    logging.error(f"Error initializing Gemini client: {e}")
+    sys.exit(1)
+
+# --- Helper Functions ---
+
+def load_spec(spec_path):
+    """Loads and parses the generative specification JSON file."""
+    if not os.path.exists(spec_path):
+        logging.error(f"Generative specification file not found: {spec_path}")
+        sys.exit(1)
+    try:
+        with open(spec_path, 'r') as f:
+            spec = json.load(f)
+        if not isinstance(spec, list):
+            logging.error("Generative specification must be a JSON array of prompt definitions.")
+            sys.exit(1)
+        return spec
+    except json.JSONDecodeError as e:
+        logging.error(f"Invalid JSON in {spec_path}: {e}")
+        sys.exit(1)
+    except Exception as e:
+        logging.error(f"Error loading specification {spec_path}: {e}")
+        sys.exit(1)
+
+def topological_sort(prompts):
+    """Sorts prompts based on 'after' dependencies to determine execution order."""
+    in_degree = defaultdict(int)
+    graph = defaultdict(list)
+    nodes = {p['prompt_id'] for p in prompts}
+
+    id_to_prompt = {p['prompt_id']: p for p in prompts}
+
+    for prompt in prompts:
+        prompt_id = prompt['prompt_id']
+        if 'after' in prompt:
+            for dep_id in prompt['after']:
+                if dep_id not in nodes:
+                    logging.error(f"Error: Prompt '{prompt_id}' depends on unknown prompt_id '{dep_id}'.")
+                    sys.exit(1)
+                graph[dep_id].append(prompt_id)
+                in_degree[prompt_id] += 1
+
+    queue = deque([p_id for p_id in nodes if in_degree[p_id] == 0])
+    sorted_order = []
+
+    while queue:
+        current_id = queue.popleft()
+        sorted_order.append(id_to_prompt[current_id])
+
+        for neighbor_id in graph[current_id]:
+            in_degree[neighbor_id] -= 1
+            if in_degree[neighbor_id] == 0:
+                queue.append(neighbor_id)
+
+    if len(sorted_order) != len(prompts):
+        logging.error("Error: Circular dependency detected in prompt graph, or some prompts are unreachable.")
+        sys.exit(1)
+    return sorted_order
+
+def extract_code_block(text, lang='python'):
+    """Extracts content from a triple-backtick code block."""
+    pattern = rf"```{lang}\s*\n(.*?)```"
+    match = re.search(pattern, text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return None
+
+def execute_prompt(prompt_definition, generated_outputs_map):
+    """Executes a single prompt using the LLM and manages context."""
+    prompt_id = prompt_definition['prompt_id']
+    description = prompt_definition['description']
+    prompt_content = prompt_definition['prompt_content']
+    output_format = prompt_definition['output_format']
+    model_name = prompt_definition.get('model', 'gemini-1.5-pro-latest')
+    temperature = prompt_definition.get('temperature', 0.7)
+
+    if model_name not in LLM_MODELS:
+        logging.warning(f"Unsupported model '{model_name}' for prompt '{prompt_id}'. Falling back to 'gemini-1.5-pro-latest'.")
+        model_name = 'gemini-1.5-pro-latest'
+
+    logging.info(f"Executing prompt: '{prompt_id}' (Description: '{description}')")
+
+    context_prefix = ""
+    if 'after' in prompt_definition:
+        for dep_id in prompt_definition['after']:
+            if dep_id in generated_outputs_map:
+                output_data = generated_outputs_map[dep_id]
+                if output_data['output_format'] == 'python':
+                    context_prefix += f"The following Python code was generated by prompt '{dep_id}':\n```python\n{output_data['content']}\n```\n\n"
+                elif output_data['output_format'] == 'json':
+                     context_prefix += f"The following JSON output was generated by prompt '{dep_id}':\n```json\n{output_data['content']}\n```\n\n"
+                elif output_data['output_format'] == 'markdown':
+                     context_prefix += f"The following Markdown content was generated by prompt '{dep_id}':\n```markdown\n{output_data['content']}\n```\n\n"
+                else: # text
+                    context_prefix += f"The following text content was generated by prompt '{dep_id}':\n```text\n{output_data['content']}\n```\n\n"
+            else:
+                logging.warning(f"Dependency '{dep_id}' for prompt '{prompt_id}' not found in generated outputs map. This might indicate an issue with context handling or an unreachable dependency.")
+
+    full_prompt = (
+        f"You are a helpful and precise code/text generation assistant. Your primary output should be in {output_format} format.\n\n"
+        f"{context_prefix}"
+        f"Your main task:\n{prompt_content}"
+    )
+
+    try:
+        model = genai.GenerativeModel(model_name=model_name)
+        response = model.generate_content(
+            full_prompt,
+            generation_config={"temperature": temperature},
+            safety_settings=[ # UPDATED SAFETY SETTINGS STRUCTURE
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
+        )
+        llm_response_content = response.text
+
+        logging.info(f"Successfully generated output for '{prompt_id}'.")
+
+        raw_output_path = os.path.join(GENERATED_OUTPUTS_DIR, f"{prompt_id}_raw.md")
+        with open(raw_output_path, 'w') as f:
+            f.write(llm_response_content)
+        logging.info(f"Raw LLM response saved to: {raw_output_path}")
+
+        processed_content = llm_response_content
+        if output_format == 'python':
+            extracted_code = extract_code_block(llm_response_content, 'python')
+            if extracted_code:
+                processed_content = extracted_code
+                output_filename = f"{prompt_id}.py"
+            else:
+                logging.warning(f"No Python code block found for prompt '{prompt_id}' with output_format 'python'. Saving raw content.")
+                output_filename = f"{prompt_id}_raw.py"
+        elif output_format == 'json':
+            try:
+                json.loads(llm_response_content)
+                output_filename = f"{prompt_id}.json"
+            except json.JSONDecodeError:
+                logging.warning(f"Output for '{prompt_id}' is not valid JSON. Saving raw content as .txt.")
+                output_filename = f"{prompt_id}.txt"
+        elif output_format == 'markdown':
+            output_filename = f"{prompt_id}.md"
+        else: # text
+            output_filename = f"{prompt_id}.txt"
+
+        final_output_path = os.path.join(GENERATED_OUTPUTS_DIR, output_filename)
+        with open(final_output_path, 'w') as f:
+            f.write(processed_content)
+        logging.info(f"Processed output saved to: {final_output_path}")
+
+        generated_outputs_map[prompt_id] = {
+            'content': processed_content,
+            'output_format': output_format,
+            'raw_response': llm_response_content
+        }
+        return True
+
+    except genai.APIError as e:
+        logging.error(f"Gemini API Error for prompt '{prompt_id}': {e}")
+        if hasattr(e, 'response') and hasattr(e.response, 'prompt_feedback'):
+            logging.error(f"Prompt Feedback: {e.response.prompt_feedback}")
+        return False
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during execution of prompt '{prompt_id}': {e}")
+        return False
+
+# --- Main CLI Logic ---
+
+def main():
+    parser = argparse.ArgumentParser(description="Just-in-Time Software (JITS) Generative Orchestrator.")
+    parser.add_argument("spec_file", help="Path to the generative specification JSON file (e.g., my_app.json).")
+    args = parser.parse_args()
+
+    spec = load_spec(args.spec_file)
+
+    os.makedirs(GENERATED_OUTPUTS_DIR, exist_ok=True)
+    logging.info(f"Generated outputs will be saved to: {GENERATED_OUTPUTS_DIR}")
+
+    sorted_prompts = topological_sort(spec)
+    logging.info("Prompt execution order determined.")
+
+    generated_outputs_map = {}
+
+    for prompt_def in sorted_prompts:
+        success = execute_prompt(prompt_def, generated_outputs_map)
+        if not success:
+            logging.error(f"Execution of prompt '{prompt_def['prompt_id']}' failed. Aborting generation.")
+            sys.exit(1)
+        print("-" * 50)
+
+    logging.info("All prompts executed successfully. Generated software available in 'generated_outputs/' directory.")
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
