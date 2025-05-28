@@ -1,0 +1,75 @@
+🧩 Generative Outline Schema (v0.1)
+
+This schema defines the structure for a Generative Outline, an intermediate artifact created by an assistant-facilitated session between a developer, a product manager, and an AI assistant. It bridges a natural language product spec and a generative software spec (prompt DAG).
+
+The outline defines components, their intent, structure, and relationships — as well as interfaces: integration points that connect components into a coherent whole.
+
+⸻
+
+📄 Top-Level Structure
+
+components:
+  - id: <unique_id>
+    role: <what this component is responsible for>
+    inputs: [<input_name>, ...]           # logical inputs to this module
+    outputs: [<output_name>, ...]         # what this module produces
+    after: [<id>, ...]                    # optional DAG dependencies
+    interface: <interface_id>             # optional: declares it implements or plugs into an interface
+
+interfaces:
+  - id: <unique_interface_id>
+    description: <textual description of what this interface connects>
+    connects:
+      - [<source_component_id>, <target_component_id>]
+
+
+⸻
+
+✅ Example: Wordcount CLI
+
+components:
+  - id: file_reader
+    role: Reads contents of a file given a path
+    inputs: [file_path]
+    outputs: [text]
+
+  - id: count_logic
+    role: Counts lines, words, and characters
+    inputs: [text]
+    outputs: [line_count, word_count, char_count]
+    after: [file_reader]
+    interface: text_input_processing
+
+  - id: cli_wrapper
+    role: CLI to read a file and print the counts
+    inputs: [file_path]
+    outputs: [stdout]
+    after: [file_reader, count_logic]
+    interface: file_to_stdout_pipeline
+
+interfaces:
+  - id: text_input_processing
+    description: Expects a string input and returns statistics
+    connects:
+      - [file_reader, count_logic]
+
+  - id: file_to_stdout_pipeline
+    description: A flow from file input to printed analysis
+    connects:
+      - [file_reader, cli_wrapper]
+      - [count_logic, cli_wrapper]
+
+
+⸻
+
+💡 Why Interfaces Matter
+	•	They clarify integration boundaries without leaking implementation details
+	•	Allow reuse of components by describing contracts, not wiring
+	•	Help the assistant understand composition structure, not just linear execution
+
+⸻
+
+🛠️ Next
+	•	Use this schema to prototype jits design and facilitate generative spec planning
+	•	Eventually evolve into prompt DAG generation and test planning
+	•	Introduce interface-level validations and contract inference
