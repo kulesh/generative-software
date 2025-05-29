@@ -26,3 +26,6 @@ Given a product description, produce a YAML generative outline with:
 3. Define contracts (interfaces) where components communicate or integrate.
 
 Return valid YAML only. Use `# Type: <category>` as a header. Don’t add explanations or prose outside the YAML.
+
+=== USER PROMPT ===
+Given the following product description, generate a valid YAML generative outline.

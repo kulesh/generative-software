@@ -1,3 +1,4 @@
+from typing import Optional
 import typer
 from rich import print
 from rich.console import Console
@@ -54,10 +55,19 @@ def call_llm(system_prompt: str, user_prompt: str) -> str:
 
 @app.command()
 def from_prompt(
-    prompt_file: str = typer.Option("prompts/from_prompt_instruction.txt", help="Path to prompt instruction file")
+    prompt_file: str = typer.Option("prompts/from_prompt_instruction.txt", help="Path to prompt instruction file"),
+    spec_file: Optional[str] = typer.Option(None, help="Optional path to file containing the product spec")
 ):
     console.print("[bold green]LLM-assisted Generative Outline Generator[/bold green]")
-    product_spec = Prompt.ask("Describe your product idea (freeform)")
+
+    if spec_file:
+        spec_path = Path(spec_file)
+        if not spec_path.exists():
+            console.print(f"[red]Product spec file not found:[/red] {spec_path}")
+            raise typer.Exit(1)
+        product_spec = spec_path.read_text(encoding="utf-8")
+    else:
+        product_spec = Prompt.ask("Describe your product idea (freeform)")
 
     system_prompt, user_instruction = parse_prompt_file(Path(prompt_file))
     full_prompt = user_instruction + "\n\n" + product_spec
